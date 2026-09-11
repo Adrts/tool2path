@@ -1,0 +1,9 @@
+# 工具链 PATH 管理器（单文件版）
+# 唯一运行期依赖：PySide6
+PySide6>=6.9
+
+# 环境与系统剥离（工程内虚拟环境）：
+#   首次：py -3.14 -m venv .venv
+#   安装：.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+#   运行：.\.venv\Scripts\python.exe toolchain_path_manager.py
+#   自测：.\.venv\Scripts\python.exe tests\selftest.py
