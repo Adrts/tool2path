@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """工具链 PATH 管理器（单文件版）。
 
 把「工具链的可执行入口目录」统一报备到与程序同级的 registered-paths.yaml，
