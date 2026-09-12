@@ -323,11 +323,19 @@ def default_config_path() -> str:
 
 
 def derive_display_name(entry_dir: str) -> str:
-    """显示名由路径末级派生（`C:\\Program Files\\nodejs` → `nodejs`），不落盘。"""
+    """显示名由路径末级派生（`C:\\Program Files\\nodejs` → `nodejs`），不落盘。
+
+    末级为 bin 时（很多工具链入口目录都叫 bin，不便区分）带上上一级目录名，
+    如 `C:\\msys64\\ucrt64\\bin` → `ucrt64/bin`；其余情况只显示末级。
+    """
     d = (entry_dir or "").strip().rstrip("\\").rstrip()
     if not d:
         return entry_dir or ""
     base = os.path.basename(d)
+    if base.lower() == "bin":
+        parent = os.path.basename(os.path.dirname(d))
+        if parent:
+            return f"{parent}/{base}"
     return base or entry_dir
 
 
