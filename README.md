@@ -123,6 +123,8 @@ py -3.14 -m venv .venv
 # py -3.12 -m venv .venv
 ```
 
+> ⚠️ **虚拟环境目录名必须为 `.venv`**（命令中的最后一段即目录名）。这是启动脚本 [run.bat](./run.bat) 的硬性要求：脚本按固定相对路径 `.venv\Scripts\python.exe` 查找解释器，名称不一致会直接报错退出。若你只打算手动敲命令运行、不使用启动脚本，则目录名可任意。
+
 ### 3. 安装依赖
 
 ```powershell
@@ -130,6 +132,14 @@ py -3.14 -m venv .venv
 ```
 
 ### 4. 运行
+
+**方式一：启动脚本（推荐，双击即可）**
+
+直接双击工程根目录下的 [run.bat](./run.bat)，脚本会自动切到自身所在目录，并用 `.venv\Scripts\python.exe` 运行主程序。
+
+> ⚠️ **本启动脚本必须搭配虚拟环境使用，且虚拟环境目录名必须为 `.venv`**（与第 2 步创建的目录保持一致）。脚本不依赖系统 PATH 中的 `python`，也不做任何环境回退：找不到 `.venv\Scripts\python.exe` 时会打印错误并退出（退出码 `1`）。
+
+**方式二：命令行手动运行**
 
 ```powershell
 .\.venv\Scripts\python.exe toolchain_path_manager.py
