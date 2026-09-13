@@ -29,5 +29,5 @@ if not exist "%PYW%" (
     exit /b 1
 )
 
-start "" "%PYW%" "%~dp0toolchain_path_manager.py" %*
+start "" "%PYW%" "%~dp0tool2path.py" %*
 exit /b 0
