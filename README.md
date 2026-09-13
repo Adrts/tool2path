@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#环境要求)
 [![GUI](https://img.shields.io/badge/GUI-PySide6%20%28Qt6%29-41cd52)](https://pypi.org/project/PySide6/)
 [![License](https://img.shields.io/badge/license-CC0--1.0-lightgrey)](./LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0.0-informational)](./toolchain_path_manager.py)
+[![Version](https://img.shields.io/badge/version-2.0.0-informational)](./tool2path.py)
 
 ---
 
@@ -62,7 +62,7 @@
 | GUI | [PySide6](https://pypi.org/project/PySide6/)（Qt 6，LGPL） |
 | 系统交互 | 标准库 `winreg` 读写 `HKCU\Environment\Path`；`ctypes` 调用 `SendMessageTimeoutW` 广播 `WM_SETTINGCHANGE` |
 | 持久化 | 纯文本 `registered-paths.yaml`（UTF-8，每行一个目录） |
-| 交付形态 | **单文件**（[toolchain_path_manager.py](./toolchain_path_manager.py)），无第三方运行期依赖（仅 PySide6） |
+| 交付形态 | **单文件**（[tool2path.py](./tool2path.py)），无第三方运行期依赖（仅 PySide6） |
 | 测试 | 自研零依赖测试脚本 [tests/selftest.py](./tests/selftest.py)（含 GUI 离屏冒烟） |
 
 ---
@@ -142,7 +142,7 @@ py -3.14 -m venv .venv
 **方式二：命令行手动运行**
 
 ```powershell
-.\.venv\Scripts\python.exe toolchain_path_manager.py
+.\.venv\Scripts\python.exe tool2path.py
 ```
 
 ### 5. 运行自测（可选，零额外依赖）
@@ -159,8 +159,8 @@ py -3.14 -m venv .venv
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install pyinstaller
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --windowed --onefile toolchain_path_manager.py
-# 产物：dist\toolchain_path_manager.exe
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --windowed --onefile tool2path.py
+# 产物：dist\tool2path.exe
 ```
 
 > 直接使用 `python` / `pip` 命令安装到全局环境同样可行，但虚拟机环境更干净、更易复现。
@@ -311,7 +311,7 @@ Windows 对 PATH 有长度限制（程序以约 32000 字符为阈值预警）�
 欢迎提交 Issue 与 Pull Request。请遵循以下约定：
 
 1. **先开 Issue 讨论**：涉及规则（R0–R7）、数据模型或交互流程的改动，请先开 Issue 说明动机与方案，避免与既有设计冲突。
-2. **保持单文件与最小依赖**：主体逻辑集中在 [toolchain_path_manager.py](./toolchain_path_manager.py)，运行期依赖仅 PySide6。引入新的第三方依赖前请先讨论。
+2. **保持单文件与最小依赖**：主体逻辑集中在 [tool2path.py](./tool2path.py)，运行期依赖仅 PySide6。引入新的第三方依赖前请先讨论。
 3. **不得违反设计规则**：特别是 **R2（锚点不变）** 与 **R0（配置文件为唯一事实源）**。任何会改变未报备路径相对顺序、或让界面状态与配置文件脱节的改动都不会被接受。
 4. **测试要求**：新增 / 修改功能需在 [tests/selftest.py](./tests/selftest.py) 中补充对应用例。请在提交前运行：
 

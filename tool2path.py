@@ -6,7 +6,7 @@ GUI 只是它的可视化编辑器；右栏把报备路径放入**用户级 PATH
 设计依据：toolchain-path-manager-design.md（v0.8，仅用户级 PATH）。
 
 运行（与系统环境剥离，使用工程内 venv）：
-    .\\.venv\\Scripts\\python.exe toolchain_path_manager.py
+    .\\.venv\\Scripts\\python.exe tool2path.py
 
 核心规则（与设计文档一致）：
     R0 配置文件即报备库（唯一事实源）

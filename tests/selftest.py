@@ -16,8 +16,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-import toolchain_path_manager as tpm                                   # noqa: E402
-from toolchain_path_manager import (                                   # noqa: E402
+import tool2path as tpm                                                # noqa: E402
+from tool2path import (                                                # noqa: E402
     ANCHOR, DEFAULT_CONFIG_NAME, Engine, MANAGED, RegistryApi,
 )
 
@@ -544,7 +544,7 @@ def test_gui_smoke_offscreen():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication, QPushButton
 
-    from toolchain_path_manager import MainWindow
+    from tool2path import MainWindow
 
     app = QApplication.instance() or QApplication(sys.argv)
     with tempfile.TemporaryDirectory() as tmp:
