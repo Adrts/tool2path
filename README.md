@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#环境要求)
 [![GUI](https://img.shields.io/badge/GUI-PySide6%20%28Qt6%29-41cd52)](https://pypi.org/project/PySide6/)
 [![License](https://img.shields.io/badge/license-CC0--1.0-lightgrey)](./LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0.0-informational)](./tool2path.py)
+[![Download](https://img.shields.io/badge/download-latest%20release-2ea44f)](https://github.com/Adrts/tool2path/releases/latest)
 
 ---
 
@@ -62,7 +62,7 @@
 | GUI | [PySide6](https://pypi.org/project/PySide6/)（Qt 6，LGPL） |
 | 系统交互 | 标准库 `winreg` 读写 `HKCU\Environment\Path`；`ctypes` 调用 `SendMessageTimeoutW` 广播 `WM_SETTINGCHANGE` |
 | 持久化 | 纯文本 `registered-paths.yaml`（UTF-8，每行一个目录） |
-| 交付形态 | **单文件**（[tool2path.py](./tool2path.py)），无第三方运行期依赖（仅 PySide6） |
+| 交付形态 | 普通用户：[Releases 预构建 exe](https://github.com/Adrts/tool2path/releases/latest)，下载即用；开发者：**单文件**源码（[tool2path.py](./tool2path.py)），无第三方运行期依赖（仅 PySide6） |
 | 测试 | 自研零依赖测试脚本 [tests/selftest.py](./tests/selftest.py)（含 GUI 离屏冒烟） |
 
 ---
@@ -104,18 +104,29 @@
 
 - **操作系统**：Windows 10 / 11（核心功能依赖 Windows 注册表与 `WM_SETTINGCHANGE` 广播）。
   - 非 Windows 平台可启动程序并在内存中预览，但不会真正写入注册表（`WindowsRegistry` 回落为内存假实现），仅供开发与测试。
-- **Python**：3.10 或更高版本（推荐 3.12+；开发与测试使用 3.14）。
 - **权限**：普通用户权限即可，**无需管理员 / UAC**（只写 `HKCU\Environment\Path`）。
-- **依赖**：仅 [PySide6](https://pypi.org/project/PySide6/) ≥ 6.9。
+- **仅从源码运行需要**：Python 3.10 或更高版本（推荐 3.12+；开发与测试使用 3.14）、[PySide6](https://pypi.org/project/PySide6/) ≥ 6.9。**下载构建好的 exe 则无需安装 Python 和任何依赖。**
 
-### 1. 获取源码
+### 方式一：下载构建好的 exe（推荐）
+
+无需安装 Python，下载即用：
+
+1. 前往 [Releases 最新版](https://github.com/Adrts/tool2path/releases/latest) 下载 `tool2path.exe`。
+2. 放到一个**有写权限的独立目录**（例如 `D:\Tools\tool2path\`），双击运行即可。
+
+> - 首次启动会在 **exe 同级目录**自动生成配置清单 `registered-paths.yaml`，建议给 exe 单独建一个目录，方便清单随 Git / dotfiles 随身携带。
+> - 无需管理员权限，也不写注册表以外的任何系统位置。
+
+### 方式二：从源码运行（面向开发者）
+
+#### 1. 获取源码
 
 ```powershell
 git clone https://github.com/Adrts/tool2path.git
 cd tool2path
 ```
 
-### 2. 创建工程内虚拟环境（与系统环境剥离，推荐）
+#### 2. 创建工程内虚拟环境（与系统环境剥离，推荐）
 
 ```powershell
 py -3.14 -m venv .venv
@@ -125,27 +136,27 @@ py -3.14 -m venv .venv
 
 > ⚠️ **虚拟环境目录名必须为 `.venv`**（命令中的最后一段即目录名）。这是启动脚本 [run.bat](./run.bat) 的硬性要求：脚本按固定相对路径 `.venv\Scripts\python.exe` 查找解释器，名称不一致会直接报错退出。若你只打算手动敲命令运行、不使用启动脚本，则目录名可任意。
 
-### 3. 安装依赖
+#### 3. 安装依赖
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-### 4. 运行
+#### 4. 运行
 
-**方式一：启动脚本（推荐，双击即可）**
+**使用启动脚本（推荐，双击即可）**
 
 直接双击工程根目录下的 [run.bat](./run.bat)，脚本会自动切到自身所在目录，并用 `.venv\Scripts\python.exe` 运行主程序。
 
 > ⚠️ **本启动脚本必须搭配虚拟环境使用，且虚拟环境目录名必须为 `.venv`**（与第 2 步创建的目录保持一致）。脚本不依赖系统 PATH 中的 `python`，也不做任何环境回退：找不到 `.venv\Scripts\python.exe` 时会打印错误并退出（退出码 `1`）。
 
-**方式二：命令行手动运行**
+**命令行手动运行**
 
 ```powershell
 .\.venv\Scripts\python.exe tool2path.py
 ```
 
-### 5. 运行自测（可选，零额外依赖）
+#### 5. 运行自测（可选，零额外依赖）
 
 ```powershell
 .\.venv\Scripts\python.exe tests\selftest.py
