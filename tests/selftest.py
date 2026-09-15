@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""自测：覆盖设计文档 R0-R7 规则 + GUI 离屏冒烟（零第三方依赖，不需要 pytest）。
+"""自测：覆盖设计文档 R0-R8 规则 + GUI 离屏冒烟（零第三方依赖，不需要 pytest）。
 
 运行：
     .\\.venv\\Scripts\\python.exe tests\\selftest.py
@@ -481,6 +481,199 @@ def test_delete_not_in_path_immediate():
 
 
 # ============================================================================
+# R8 失效目录：判定 / 重建 / 删除声明
+# ============================================================================
+def test_dir_missing_rule_for_toolchain():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = os.path.join(tmp, "tool")
+        t = tpm.Toolchain(id="a", name="tool", entry_dir=d)
+        assert t.dir_missing
+        os.makedirs(d)
+        assert not t.dir_missing
+        assert not tpm.Toolchain(id="b", name="npm",
+                                 entry_dir=r"%USERPROFILE%\npm").dir_missing
+
+
+def test_delete_decl_text_adapts_to_dir_state():
+    """确认框第二句按目录现状自适应：目录在 → 承诺不动磁盘；目录不在 → 只说移除登记。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        present = os.path.join(tmp, "present")
+        os.makedirs(present)
+        gone = os.path.join(tmp, "gone")
+        yes = tpm.delete_decl_text("a", present)
+        no = tpm.delete_decl_text("b", gone)
+        assert "不会删除磁盘" in yes
+        assert "不在磁盘上" in no and "不会删除磁盘" not in no
+        var = tpm.delete_decl_text("c", r"%USERPROFILE%\npm")
+        assert "不会删除磁盘" in var                 # 含 %VAR% 无法判定 → 保守承诺
+        assert "失去报备身份" in tpm.delete_decl_text("d", gone, in_path_managed=True)
+
+
+def test_row_missing_covers_anchor_and_managed():
+    with tempfile.TemporaryDirectory() as tmp:
+        present = os.path.join(tmp, "present")
+        gone = os.path.join(tmp, "gone")
+        var_row = r"%USERPROFILE%\npm"
+        os.makedirs(present)
+        reg = FakeRegistry(user=f"{present};{gone};{var_row}")
+        e = make_engine(reg, tmp)
+        e.start()
+        by_val = {r.value_raw: r for r in e.rows()}
+        assert not e.row_missing(by_val[present])
+        assert e.row_missing(by_val[gone])              # 锚点也能判定（核心改动点）
+        assert not e.row_missing(by_val[var_row])       # 含 %VAR% → 不参与判定
+        assert add(e, gone).ok                          # 接管为报备项后仍判定失效
+        assert by_val[gone].kind == MANAGED
+        assert e.row_missing(by_val[gone])
+        assert e.anchor_invariant_check() == []
+
+
+def test_missing_count_covers_left_right_and_anchor():
+    with tempfile.TemporaryDirectory() as tmp:
+        present = os.path.join(tmp, "present")
+        os.makedirs(present)
+        left_gone = os.path.join(tmp, "left-gone")      # 左栏失效报备（不在 PATH）
+        right_gone = os.path.join(tmp, "right-gone")    # 右栏失效报备（已在 PATH）
+        anchor_gone = os.path.join(tmp, "anchor-gone")  # 右栏失效锚点
+        reg = FakeRegistry(user=f"{right_gone};{present};{anchor_gone}")
+        e = make_engine(reg, tmp, preset=f"# hdr\n- {left_gone}\n- {right_gone}\n")
+        e.start()
+        assert e.missing_count() == 3
+        assert len(e.missing_rows()) == 2               # missing_rows 只覆盖右栏工作序列
+        os.makedirs(left_gone)                          # 目录恢复存在 → 计数下降
+        assert e.missing_count() == 2
+
+
+def test_rebuild_dir_creates_multilevel_and_clears_missing():
+    with tempfile.TemporaryDirectory() as tmp:
+        deep = os.path.join(tmp, "a", "b", "c")
+        reg = FakeRegistry(user=deep)
+        e = make_engine(reg, tmp)
+        e.start()
+        assert e.missing_count() == 1
+        res = e.rebuild_dir(deep)
+        assert res.ok and os.path.isdir(deep)
+        assert e.missing_count() == 0 and e.missing_rows() == []
+        assert e.pending_count() == 0                   # 重建不进待应用
+
+
+def test_rebuild_dir_failures_keep_files_intact():
+    with tempfile.TemporaryDirectory() as tmp:
+        e = make_engine(FakeRegistry(), tmp)
+        e.start()
+        assert not e.rebuild_dir("").ok
+        assert not e.rebuild_dir("relative\\dir").ok    # 非绝对路径被拒
+        f = os.path.join(tmp, "occupied")               # 同名文件占位：不覆盖
+        with open(f, "w", encoding="utf-8") as fp:
+            fp.write("keep")
+        res = e.rebuild_dir(f)
+        assert not res.ok and res.message
+        assert os.path.isfile(f)
+        assert open(f, encoding="utf-8").read() == "keep"
+        res = e.rebuild_dir(os.path.join(f, "sub"))     # 父级是文件 → 创建必失败
+        assert not res.ok and res.message
+
+
+def test_delete_missing_library_immediate_write():
+    with tempfile.TemporaryDirectory() as tmp:
+        gone = os.path.join(tmp, "gone")
+        keep = os.path.join(tmp, "keep")
+        os.makedirs(keep)
+        e = make_engine(FakeRegistry(), tmp, preset=f"# my header\n- {gone}\n- {keep}\n")
+        e.start()
+        assert e.missing_count() == 1
+        assert e.delete_toolchain(tool(e, gone).id).ok
+        assert e.pending_count() == 0                    # 不在 PATH → 即时写盘
+        assert lib_dirs(e) == [keep]                     # 库序不变，仅少一行
+        text = open(e.library.path, encoding="utf-8").read()
+        assert text.startswith("# my header") and gone not in text
+
+
+def test_delete_missing_managed_in_path_pending_and_undo():
+    with tempfile.TemporaryDirectory() as tmp:
+        gone = os.path.join(tmp, "gone")
+        reg = FakeRegistry(user=gone)
+        e = make_engine(reg, tmp, preset=f"- {gone}\n")
+        e.start()
+        tid = tool(e, gone).id
+        assert e.toolchain_in_path(tid)
+        assert e.delete_toolchain(tid).ok
+        assert e.pending_count() == 1 and e.pending_entries() == 1
+        assert values(e) == []
+        assert e.undo_group(e.pending[-1].group_id).ok   # 整组撤销恢复报备与库序
+        assert e.library.by_norm(tpm.norm_path(gone)) is not None
+        assert values(e) == [gone]
+        assert e.delete_toolchain(tid).ok
+        assert e.apply().ok
+        assert gone not in reg.user
+
+
+def test_delete_missing_anchor_pending_only_config_untouched():
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "a")
+        gone = os.path.join(tmp, "gone")
+        os.makedirs(a)
+        reg = FakeRegistry(user=f"{a};{gone}")
+        e = make_engine(reg, tmp)
+        e.start()
+        uid = uid_of(e, gone)
+        before = open(e.library.path, "rb").read()
+        assert e.remove_missing_rows([uid]).ok
+        assert values(e) == [a]
+        assert e.pending_count() == 1 and e.pending_entries() == 1
+        assert open(e.library.path, "rb").read() == before      # 配置文件逐字节不变
+        assert e.anchor_invariant_check() == []
+        assert e.apply().ok
+        assert reg.user == a
+
+
+def test_delete_missing_anchor_undo_restores_order():
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "a")
+        b = os.path.join(tmp, "b")
+        gone = os.path.join(tmp, "gone")
+        os.makedirs(a)
+        os.makedirs(b)
+        reg = FakeRegistry(user=f"{a};{gone};{b}")
+        e = make_engine(reg, tmp)
+        e.start()
+        assert e.remove_missing_rows([uid_of(e, gone)]).ok
+        assert values(e) == [a, b]
+        assert e.undo_last().ok
+        assert values(e) == [a, gone, b]                 # 位置与移除前一致
+        assert e.anchor_invariant_check() == []
+
+
+def test_remove_missing_rows_rejects_existing_and_managed():
+    with tempfile.TemporaryDirectory() as tmp:
+        present = os.path.join(tmp, "present")
+        gone = os.path.join(tmp, "gone")
+        os.makedirs(present)
+        reg = FakeRegistry(user=f"{present};{gone}")
+        e = make_engine(reg, tmp, preset=f"- {gone}\n")
+        e.start()
+        assert not e.remove_missing_rows([]).ok
+        assert not e.remove_missing_rows([uid_of(e, present)]).ok   # 目录存在 → 拒绝
+        assert not e.remove_missing_rows([uid_of(e, gone)]).ok      # 报备项 → 走报备渠道
+        assert e.pending_count() == 0 and values(e) == [present, gone]
+
+
+def test_protection_mode_missing_anchor_still_disposable():
+    with tempfile.TemporaryDirectory() as tmp:
+        gone1 = os.path.join(tmp, "gone1")
+        gone2 = os.path.join(tmp, "gone2")
+        cfg = os.path.join(tmp, DEFAULT_CONFIG_NAME)
+        os.makedirs(cfg)                                 # 配置文件不可读 → 保护态
+        reg = FakeRegistry(user=f"{gone1};{gone2}")
+        e = Engine(registry=reg, config_path=cfg)
+        e.start()
+        assert not e.config_ok and e.left_items() == []   # 报备库为空，右栏仍可处置
+        assert e.rebuild_dir(gone1).ok and os.path.isdir(gone1)
+        assert e.remove_missing_rows([uid_of(e, gone2)]).ok
+        assert e.pending_count() == 1
+
+
+# ============================================================================
 # 写回失败 / 超长 / 重载
 # ============================================================================
 def test_write_failure_keeps_pending():
@@ -535,6 +728,39 @@ def test_reload_config_reclassifies_rows():
         assert r.ok
         assert [x.kind for x in e.rows()] == [MANAGED, MANAGED]
         assert e.pending_count() == 0
+
+
+def test_refresh_merges_reload_and_reread():
+    """刷新 = 重读配置 + 重读注册表 + 重扫存在性；放弃全部待应用变更。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        node = os.path.join(tmp, "node")
+        py = os.path.join(tmp, "py")
+        extra = os.path.join(tmp, "extra")
+        gone = os.path.join(tmp, "gone")
+        for d in (node, py, extra):
+            os.makedirs(d)
+        reg = FakeRegistry(user=node)
+        e = make_engine(reg, tmp)
+        e.start()
+        add(e, node)                                   # node 已在 PATH → 报备即接管
+        add(e, py)                                     # py 仅在报备库
+        e.move_in_selected([tool(e, py).id])           # 生成 1 组待应用
+        assert e.pending_count() == 1
+        reg.user = f"{node};{gone}"                    # 外部改动注册表
+        with open(e.library.path, "a", encoding="utf-8") as f:
+            f.write(f"- {extra}\n")                    # 外部改动配置文件
+        assert e.refresh().ok
+        assert e.pending_count() == 0                  # 待应用被放弃
+        assert values(e) == [node, gone]               # 右栏以注册表重建
+        assert lib_dirs(e) == [node, py, extra]        # 配置文件已重载
+        assert e.missing_count() == 1                  # 存在性已重扫（仅 gone 失效）
+        assert e.anchor_invariant_check() == []
+
+        cfg = os.path.join(tmp, "broken", DEFAULT_CONFIG_NAME)
+        os.makedirs(cfg)                               # 配置文件不可读 → 保护态
+        e2 = Engine(registry=FakeRegistry(user="X"), config_path=cfg)
+        e2.start()
+        assert not e2.refresh().ok and not e2.config_ok
 
 
 # ============================================================================
@@ -614,13 +840,72 @@ def test_gui_smoke_offscreen():
 
         win._applying = True                           # 写盘锁：全部禁用
         win._set_mutation_enabled(False)
-        for txt in ("报备新目录", "重新载入配置", "重读注册表", "移入", "移出",
+        for txt in ("报备新目录", "刷新", "移入", "移出",
                     "撤销", "待应用", "应用", "确认", "退出"):
             assert btns(txt) and all(not b.isEnabled() for b in btns(txt)), txt
         win._applying = False
         win._set_mutation_enabled(True)
         win._update_status()
         assert all(b.isEnabled() for b in btns("退出"))
+
+        win.close()
+        app.processEvents()
+
+
+# ============================================================================
+# GUI 离屏：失效行黄标与行内重建
+# ============================================================================
+def test_missing_ui_buttons_only_for_missing_rows():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from tool2path import LibraryRow, MainWindow, PathRow
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    class Stub:
+        def on_toggle(self, *a):
+            pass
+
+        def on_step(self, *a):
+            pass
+
+        def on_missing_menu(self, *a):
+            pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        present = os.path.join(tmp, "present")
+        right_gone = os.path.join(tmp, "right-gone")
+        left_gone = os.path.join(tmp, "left-gone")
+        os.makedirs(present)
+        reg = FakeRegistry(user=f"{right_gone};{present}")
+        e = make_engine(reg, tmp, preset=f"# hdr\n- {left_gone}\n")
+        e.start()
+
+        # 左栏：只有失效报备行渲染黄标按钮
+        assert LibraryRow(tool(e, left_gone), False, Stub())._missing_btn is not None
+        assert LibraryRow(tpm.Toolchain(id="x", name="present", entry_dir=present),
+                          False, Stub())._missing_btn is None
+        # 右栏：失效锚点也渲染（此前锚点完全没有交互控件），正常行不渲染
+        by_val = {r.value_raw: r for r in e.rows()}
+        assert PathRow(by_val[right_gone], False, Stub(),
+                       missing=e.row_missing(by_val[right_gone]))._missing_btn is not None
+        assert PathRow(by_val[present], False, Stub(),
+                       missing=e.row_missing(by_val[present]))._missing_btn is None
+
+        win = MainWindow(e)
+        win.show()
+        app.processEvents()
+        assert "2 个目录不存在" in win.status_label.text()   # 计数含失效锚点
+
+        win._on_rebuild_dir("path", by_val[right_gone].uid)  # 成功静默刷新
+        app.processEvents()
+        assert os.path.isdir(right_gone)
+        assert "1 个目录不存在" in win.status_label.text()
+        win._on_rebuild_dir("library", tool(e, left_gone).id)
+        app.processEvents()
+        assert os.path.isdir(left_gone)
+        assert "个目录不存在" not in win.status_label.text()
 
         win.close()
         app.processEvents()

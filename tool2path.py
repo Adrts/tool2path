@@ -3,7 +3,7 @@
 把「工具链的可执行入口目录」统一报备到与程序同级的 registered-paths.yaml，
 GUI 只是它的可视化编辑器；右栏把报备路径放入**用户级 PATH**。
 
-设计依据：toolchain-path-manager-design.md（v0.8，仅用户级 PATH）。
+设计依据：design/Design Doc.md（v1.1，仅用户级 PATH，规则 R0–R8）。
 
 运行（与系统环境剥离，使用工程内 venv）：
     .\\.venv\\Scripts\\python.exe tool2path.py
@@ -17,6 +17,7 @@ GUI 只是它的可视化编辑器；右栏把报备路径放入**用户级 PATH
     R5 右栏拖动：仅报备项可拖，落任意插入位或反向拖回左栏=移出
     R6 唯一性：同目录禁止重复报备，移入判重
     R7 待应用机制：右栏改动只进内存，应用 / 确认时全量写回注册表
+    R8 失效目录行内处置：行内重建目录 / 删除声明，删除只移除声明不动磁盘
 
 注册表写入遵循 Microsoft 关于改写 PATH 的标准做法：
     * 键位固定为 HKCU\\Environment\\Path（只写用户级，绝不触碰 HKLM / 其他键）；
@@ -37,14 +38,18 @@ import threading
 import time
 import uuid
 
-if sys.platform == "win32":                       # 仅 Windows 需要，非 Windows 走内存假实现
-    import ctypes
-    import winreg
+if sys.platform != "win32":                       # Windows 专用：非 Windows 直接拒绝启动
+    print("tool2path 仅支持 Windows（依赖注册表 HKCU\\Environment 与 Win32 API）。",
+          file=sys.stderr)
+    raise SystemExit(1)
+
+import ctypes                                     # noqa: E402
+import winreg                                     # noqa: E402
 
 # ============================================================================
 # 应用信息与常量
 # ============================================================================
-__version__ = "2.0.0"
+__version__ = "1.1.0"
 APP_NAME = "ToolchainPathManager"
 APP_DISPLAY_NAME = "工具链 PATH 管理器"
 
@@ -242,66 +247,51 @@ class RegistryApi:
         raise NotImplementedError
 
 
-if sys.platform == "win32":
-    _send_message_timeout = ctypes.windll.user32.SendMessageTimeoutW
-    _send_message_timeout.argtypes = [
-        ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_wchar_p,
-        ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t),
-    ]
-    _send_message_timeout.restype = ctypes.c_void_p
+_send_message_timeout = ctypes.windll.user32.SendMessageTimeoutW
+_send_message_timeout.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_wchar_p,
+    ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t),
+]
+_send_message_timeout.restype = ctypes.c_void_p
 
-    def _broadcast_environment_change() -> None:
-        """广播 WM_SETTINGCHANGE（lParam = "Environment"），使环境变更对新进程生效。"""
+
+def _broadcast_environment_change() -> None:
+    """广播 WM_SETTINGCHANGE（lParam = "Environment"），使环境变更对新进程生效。"""
+    try:
+        _send_message_timeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+                              "Environment", SMTO_ABORTIFHUNG, 3000, None)
+    except Exception:
+        pass  # 广播失败不影响写回结果
+
+
+class WindowsRegistry(RegistryApi):
+    """只读写 HKCU\\Environment\\Path，不触碰 HKLM 与任何其他键值。"""
+
+    def read_user(self):
         try:
-            _send_message_timeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
-                                  "Environment", SMTO_ABORTIFHUNG, 3000, None)
-        except Exception:
-            pass  # 广播失败不影响写回结果
-
-    class WindowsRegistry(RegistryApi):
-        """只读写 HKCU\\Environment\\Path，不触碰 HKLM 与任何其他键值。"""
-
-        def read_user(self):
-            try:
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, USER_REG_PATH,
-                                     0, winreg.KEY_READ)
-            except FileNotFoundError:
-                return None, None
-            try:
-                value, rtype = winreg.QueryValueEx(key, VALUE_NAME)
-                return value, int(rtype)
-            except FileNotFoundError:
-                return None, None
-            finally:
-                winreg.CloseKey(key)
-
-        def write_user(self, value: str, reg_type: int) -> None:
-            # 保持原类型：REG_EXPAND_SZ 与 REG_SZ 不互相转换（Microsoft 约定）。
-            try:
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, USER_REG_PATH,
-                                     0, winreg.KEY_SET_VALUE)
-            except FileNotFoundError:
-                key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, USER_REG_PATH)
-            try:
-                winreg.SetValueEx(key, VALUE_NAME, 0, reg_type, value)
-            finally:
-                winreg.CloseKey(key)
-
-else:  # 非 Windows（测试 / 开发预览回退）
-    class WindowsRegistry(RegistryApi):
-        def read_user(self):
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, USER_REG_PATH,
+                                 0, winreg.KEY_READ)
+        except FileNotFoundError:
             return None, None
+        try:
+            value, rtype = winreg.QueryValueEx(key, VALUE_NAME)
+            return value, int(rtype)
+        except FileNotFoundError:
+            return None, None
+        finally:
+            winreg.CloseKey(key)
 
-        def write_user(self, value, reg_type):
-            pass
-
-    def _broadcast_environment_change() -> None:
-        pass
-
-
-def broadcast_environment_change():
-    if sys.platform == "win32":
-        _broadcast_environment_change()
+    def write_user(self, value: str, reg_type: int) -> None:
+        # 保持原类型：REG_EXPAND_SZ 与 REG_SZ 不互相转换（Microsoft 约定）。
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, USER_REG_PATH,
+                                 0, winreg.KEY_SET_VALUE)
+        except FileNotFoundError:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, USER_REG_PATH)
+        try:
+            winreg.SetValueEx(key, VALUE_NAME, 0, reg_type, value)
+        finally:
+            winreg.CloseKey(key)
 
 
 def get_registry() -> RegistryApi:
@@ -549,7 +539,7 @@ class Engine:
         if not self.config_ok:
             self.warnings.append(
                 f"配置文件（{self.library.config_name}）未能加载：已进入保护态，"
-                "禁止写 PATH 相关操作，请修复后点「重新载入配置」。")
+                "禁止写 PATH 相关操作，请修复后点「刷新」。")
         try:
             self._read_path()
         except Exception as e:  # noqa: BLE001
@@ -618,6 +608,27 @@ class Engine:
             return False
         return any(r.toolchain_id == tid for r in self.rows())
 
+    # ---------------------------------------------------------------- 失效判定（R8.1）
+    def row_missing(self, row: Row) -> bool:
+        """任意行（含锚点）的目录失效判定。
+
+        与 `Toolchain.dir_missing` 同一口径：含 %VAR% 的路径不参与判定，
+        其余按 `os.path.isdir` 真假；不区分、也不解释失效原因。
+        """
+        p = (row.value_raw or "").strip()
+        if not p or "%" in p:
+            return False
+        return not os.path.isdir(p)
+
+    def missing_rows(self) -> list[Row]:
+        """当前工作序列（右栏）中所有失效行，供渲染与状态栏共用。"""
+        return [r for r in self.rows() if self.row_missing(r)]
+
+    def missing_count(self) -> int:
+        """失效目录合计：左栏失效报备 + 右栏失效行（报备项与锚点一视同仁）。"""
+        left = sum(1 for t in self.left_items() if t.dir_missing)
+        return left + len(self.missing_rows())
+
     # ---------------------------------------------------------------- 待应用组快照
     def _lib_order(self) -> list[str]:
         return [t.id for t in self.library.sorted()]
@@ -651,7 +662,7 @@ class Engine:
     def register_toolchain(self, dirs) -> OpResult:
         """报备一个 / 一批目录（写入配置文件末尾）。显示名由路径末级派生。"""
         if not self.config_ok:
-            return OpResult.fail("配置文件未加载，禁止写入（请先点「重新载入配置」）")
+            return OpResult.fail("配置文件未加载，禁止写入（请先点「刷新」）")
         if isinstance(dirs, str):
             dirs = [dirs]
         added: list[Toolchain] = []
@@ -728,6 +739,53 @@ class Engine:
         self._commit(group, len(in_rows))
         return OpResult.ok_result(
             f"已删除报备 {t.name}，并生成移出待应用变更（应用后从 PATH 移除）")
+
+    # ================================================================ 失效目录处置（R8）
+    def rebuild_dir(self, path: str) -> OpResult:
+        """重建目录（R8.2）：创建目录及多级父目录。
+
+        文件系统操作，不进待应用、不可撤销；失败返回可读文案，不覆盖任何已有文件。
+        """
+        p = (path or "").strip()
+        if not p:
+            return OpResult.fail("路径为空，无法重建目录")
+        if not os.path.isabs(p):
+            return OpResult.fail(f"不是绝对路径，无法重建目录：{p}")
+        try:
+            os.makedirs(p, exist_ok=True)
+        except FileExistsError:
+            return OpResult.fail(f"目标位置上已存在同名文件，未做任何改动：{p}")
+        except OSError as e:
+            return OpResult.fail(f"重建目录失败：{p}\n{e}")
+        return OpResult.ok_result(f"已创建目录：{p}")
+
+    def remove_missing_rows(self, uids: list[str]) -> OpResult:
+        """删除失效锚点行（R8.3 第三类）：只从工作序列移除并生成待应用组。
+
+        不触碰配置文件（R8.4）：仅 PATH 侧进入待应用，可 Ctrl+Z 整组撤销；
+        非锚点行或目录仍存在的行一律拒绝。
+        """
+        if not uids:
+            return OpResult.fail("未指定要删除的行")
+        targets: list[Row] = []
+        for uid in self._display_order(uids):
+            row = self._find_row(uid)
+            if row is None:
+                continue
+            if row.kind != ANCHOR:
+                return OpResult.fail("该行是报备项，删除请走报备渠道")
+            if not self.row_missing(row):
+                return OpResult.fail(f"该行目录存在，不提供删除处置：{row.value_raw}")
+            targets.append(row)
+        if not targets:
+            return OpResult.fail("要删除的行已不存在")
+
+        group = self._begin(f"删除 {len(targets)} 个失效锚点")
+        gone = {r.uid for r in targets}
+        self.state.rows = [r for r in self.rows() if r.uid not in gone]
+        self._commit(group, len(targets))
+        return OpResult.ok_result(
+            f"已生成删除声明待应用变更（{len(targets)} 项），应用后从 PATH 移除")
 
     # ================================================================ 库内排序（R3 直接持久化）
     def reorder_library(self, visible_ids_in_order: list[str]) -> None:
@@ -982,15 +1040,28 @@ class Engine:
         self.pending = []
         self._restore(snap)
 
-    # ================================================================ 重读注册表
-    def reread(self) -> OpResult:
-        was = bool(self.pending)
+    # ================================================================ 刷新（配置 + 注册表 + 存在性）
+    def refresh(self) -> OpResult:
+        """刷新：重读配置文件 + 以注册表重建右栏，目录存在性随之重算。
+
+        合并原「重新载入配置」与「重读注册表」两个动作：全部待应用变更被放弃；
+        配置文件载入失败时仍会重读注册表，并进入保护态。
+        """
+        issues = self.library.load()
+        self.config_ok = self.library.loaded_ok()
+        self.config_issues = issues
         self.pending = []
         try:
             self._read_path()
         except Exception as e:  # noqa: BLE001
-            return OpResult.fail(f"重读注册表失败：{e}")
-        return OpResult.ok_result("已重读注册表并清空待应用变更" if was else "已重读注册表")
+            return OpResult.fail(f"刷新失败：读取注册表出错：{e}")
+        if not self.config_ok:
+            return OpResult.fail(
+                "已重读注册表；配置文件载入失败，已进入保护态（禁止写 PATH 相关操作）")
+        msg = "已刷新：重新载入配置文件、重读注册表，目录存在性已重新扫描"
+        if issues:
+            msg += "\n" + "\n".join(issues)
+        return OpResult.ok_result(msg)
 
     # ================================================================ 重新载入配置文件（R0）
     def reload_config(self) -> OpResult:
@@ -1062,7 +1133,7 @@ class Engine:
         if problems:
             return ApplyOutcome(ok=False, failed=[USER_LABEL],
                                 messages=["R2 锚点断言失败：PATH 可能已被外部程序改动，"
-                                          "请先「重读注册表」再操作。" + "；".join(problems)])
+                                          "请先「刷新」再操作。" + "；".join(problems)])
 
         if too_long and not confirm_long:
             return ApplyOutcome(ok=True, skipped=[USER_LABEL],
@@ -1083,7 +1154,7 @@ class Engine:
             outcome.messages.append("变更仍保持待应用状态，可撤销或再次「应用」重试")
             return outcome
 
-        broadcast_environment_change()
+        _broadcast_environment_change()
         # 刷新快照并清空待应用
         st = self.state
         st.base_raw = self._target_value()
@@ -1141,6 +1212,35 @@ def _chip(text: str, color: str, fg: str = "white") -> QLabel:
         f"background:{color};color:{fg};border-radius:7px;padding:1px 6px;"
         "font-size:10px;font-weight:600;")
     return lab
+
+
+def _missing_button(tip: str) -> QToolButton:
+    """失效行的可点黄标按钮（R8.1）：点开是「重建目录 / 删除声明」两项菜单。"""
+    b = QToolButton()
+    b.setText("目录不存在 ▾")
+    b.setToolTip(tip)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setStyleSheet(
+        "QToolButton{background:#b25e09;color:#ffffff;border:none;border-radius:7px;"
+        "padding:1px 6px;font-size:10px;font-weight:600;}"
+        "QToolButton:hover{background:#c96a0c;}")
+    return b
+
+
+def delete_decl_text(name: str, entry_dir: str, in_path_managed: bool = False) -> str:
+    """删除确认框文案（R8.3）：只移除声明，不触碰磁盘上的文件。
+
+    目录仍在磁盘上（或含 %VAR% 无法判定）时，明确承诺不动磁盘文件；
+    目录本就不存在时不再提磁盘，只说移除这条登记，避免对失效项造成理解噪音。
+    """
+    text = f"将从声明中移除「{name}」，路径 {entry_dir}。"
+    if "%" in entry_dir or os.path.isdir(entry_dir):
+        text += "\n仅移除声明，不会删除磁盘上的任何文件或目录。"
+    else:
+        text += "\n该目录当前不在磁盘上，删除仅移除这条登记。"
+    if in_path_managed:
+        text += "\n\n若在应用前退出，该路径仍在 PATH 中，但已失去报备身份（变回锁定锚点）。"
+    return text
 
 
 class DragList(QListWidget):
@@ -1433,9 +1533,13 @@ class LibraryRow(QFrame):
         lay.addLayout(v, 1)
 
         if toolchain.dir_missing:
-            warn = _chip("目录不存在", "#b25e09")
-            warn.setToolTip("目录不存在 / 不可访问（软校验，可一键重设路径）")
-            lay.addWidget(warn)
+            self._missing_btn = _missing_button("目录不存在：可重建目录或删除声明")
+            self._missing_btn.clicked.connect(
+                lambda: callbacks.on_missing_menu("library", self.toolchain_id,
+                                                  self._missing_btn))
+            lay.addWidget(self._missing_btn)
+        else:
+            self._missing_btn = None
 
         lay.addWidget(_chip("报备库", "#9aa0a8"))
         self.set_checked(selected, emit=False)
@@ -1462,6 +1566,7 @@ class PathRow(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(6, 2, 6, 2)
         lay.setSpacing(6)
+        self._missing_btn = None
 
         if row.kind == "managed":
             self._cb = QCheckBox()
@@ -1479,7 +1584,8 @@ class PathRow(QFrame):
             lay.addWidget(pad)
             lay.addWidget(_chip("锚点", "#8a8f98", "#ffffff"))
             lock = QLabel("🔒")
-            lock.setToolTip("未报备路径：顺序固定，不可移动 / 删除 / 勾选")
+            lock.setToolTip("未报备路径：顺序固定，不可移动 / 勾选；"
+                            "目录不存在时可重建或删除声明")
             lay.addWidget(lock)
 
         v = QVBoxLayout()
@@ -1495,15 +1601,26 @@ class PathRow(QFrame):
         v.addWidget(path)
         lay.addLayout(v, 1)
 
+        if missing and row.kind != "managed":            # 锚点行：失效时唯一的交互控件
+            self._missing_btn = self._missing(callbacks, row.uid)
+            lay.addWidget(self._missing_btn)
+
         if row.kind == "managed":
             if missing:
-                lay.addWidget(_chip("目录不存在", "#b25e09"))
+                self._missing_btn = self._missing(callbacks, row.uid)
+                lay.addWidget(self._missing_btn)
             up = self._arrow("▲", "上移一格")
             down = self._arrow("▼", "下移一格")
             up.clicked.connect(lambda: callbacks.on_step(row.uid, up=True))
             down.clicked.connect(lambda: callbacks.on_step(row.uid, up=False))
             lay.addWidget(up)
             lay.addWidget(down)
+
+    def _missing(self, callbacks, uid: str) -> QToolButton:
+        """失效行的可点黄标（锚点行也渲染，是它唯一的交互控件）。"""
+        b = _missing_button("目录不存在：可重建目录或删除声明")
+        b.clicked.connect(lambda: callbacks.on_missing_menu("path", uid, b))
+        return b
 
     def _emit_toggle(self, on: bool):
         if self._cb.property("_prog"):
@@ -1737,15 +1854,10 @@ class MainWindow(QWidget):
         self.filter_edit.textChanged.connect(self._apply_filter)
         top.addWidget(self.filter_edit)
 
-        reload_cfg = QPushButton("⟳ 重新载入配置")
-        reload_cfg.setToolTip("重读 registered-paths.yaml，刷新报备库（保留待应用变更）")
-        reload_cfg.clicked.connect(self._on_reload_config)
-        top.addWidget(reload_cfg)
-
-        reread = QPushButton("↻ 重读注册表")
-        reread.setToolTip("以注册表为事实源重建右栏并清空待应用变更（配置文件不动）")
-        reread.clicked.connect(self._on_reread)
-        top.addWidget(reread)
+        refresh_btn = QPushButton("⟳ 刷新")
+        refresh_btn.setToolTip("重新载入配置文件、重读注册表并重新扫描目录是否存在；未应用的变更将被放弃")
+        refresh_btn.clicked.connect(self._on_refresh)
+        top.addWidget(refresh_btn)
         root.addLayout(top)
 
         # ---- 三区
@@ -1871,12 +1983,6 @@ class MainWindow(QWidget):
         QShortcut(QKeySequence("Ctrl+A"), self, activated=self._select_all_path)
 
     # ================================================================ 渲染
-    def _row_missing(self, row: Row) -> bool:
-        if row.kind != MANAGED or not row.toolchain_id:
-            return False
-        t = self.engine.library.by_id(row.toolchain_id)
-        return bool(t and t.dir_missing)
-
     def _rebuild_left(self):
         keep = self._sel_left & {t.id for t in self.engine.left_items()}
         self._sel_left = keep
@@ -1898,7 +2004,7 @@ class MainWindow(QWidget):
         self.path_list.clear()
         for r in self.engine.rows():
             sel = r.uid in keep and r.kind == MANAGED
-            w = PathRow(r, sel, self, missing=self._row_missing(r))
+            w = PathRow(r, sel, self, missing=self.engine.row_missing(r))
             w.set_checked(sel, emit=False)
             kind_txt = "报备" if r.kind == MANAGED else "锚点"
             self.path_list.add_row(
@@ -1923,7 +2029,7 @@ class MainWindow(QWidget):
         """
         btns = getattr(self, "_mut_btns", None)
         if btns is None:
-            names = ("报备新目录", "重新载入配置", "重读注册表",
+            names = ("报备新目录", "刷新",
                      "移入", "移出", "撤销", "待应用", "应用", "确认", "退出")
             btns = [b for b in self.findChildren(QPushButton)
                     if any(n in b.text() for n in names)]
@@ -1939,11 +2045,9 @@ class MainWindow(QWidget):
         pend = self.engine.pending_count()
         entries = self.engine.pending_entries()
         parts = [f"待应用 {pend} 组 / {entries} 项"]
-        missing = [t for t in self.engine.left_items() if t.dir_missing]
-        missing += [t for t in self.engine.library.sorted()
-                    if self.engine.toolchain_in_path(t.id) and t.dir_missing]
+        missing = self.engine.missing_count()
         if missing:
-            parts.append(f"· ⚠ {len(missing)} 个目录不存在（标黄）")
+            parts.append(f"· ⚠ {missing} 个目录不存在（标黄可点）")
         self.status_label.setText("  |  ".join(parts))
 
         self.pending_btn.setText(f"待应用 {entries} 项" if entries else "待应用 0 项")
@@ -1960,7 +2064,8 @@ class MainWindow(QWidget):
 
     def _update_right_hint(self):
         self.right_hint.setText(
-            "灰色【锚点】行是未报备的既有路径：顺序固定，不可勾选 / 移动 / 删除。"
+            "灰色【锚点】行是未报备的既有路径：顺序固定，不可勾选 / 移动；"
+            "只有当目录不存在时，才可通过行内黄标重建目录或删除声明。"
             "报备行可多选整组拖动落位，或直接拖回左栏「报备库」= 移出。")
 
     # ================================================================ 选中回调（widgets 调用）
@@ -1985,6 +2090,67 @@ class MainWindow(QWidget):
             return
         self._run_op(self.engine.step_move(uid, up))
 
+    # ================================================================ 失效目录行内处置（R8）
+    def on_missing_menu(self, panel: str, ident: str, button) -> None:
+        """点开失效行的黄标：第一项重建目录，第二项删除声明（文案随行身份变化）。"""
+        menu = QMenu(self)
+        menu.addAction("重建目录", lambda: self._on_rebuild_dir(panel, ident))
+        if panel == "library":
+            label = "删除声明"
+        else:
+            row = self._row_by_uid(ident)
+            if row is None:
+                return
+            label = "移出并删除声明" if row.kind == MANAGED else "删除声明"
+        act = menu.addAction(label, lambda: self._on_delete_missing(panel, ident))
+        act.setEnabled(not self._applying)       # 写盘期间删除禁用；重建不写注册表仍可执行
+        menu.exec(button.mapToGlobal(QPoint(0, button.height())))
+
+    def _on_rebuild_dir(self, panel: str, ident: str):
+        """重建目录：成功静默刷新，失败弹错误框（不进待应用、不可撤销）。"""
+        if panel == "library":
+            t = self.engine.library.by_id(ident)
+            if not t:
+                return
+            path = t.entry_dir
+        else:
+            row = self._row_by_uid(ident)
+            if row is None:
+                return
+            path = row.value_raw
+        res = self.engine.rebuild_dir(path)
+        if not res.ok:
+            error(self, res.message or "重建目录失败")
+        self._refresh()
+
+    def _on_delete_missing(self, panel: str, ident: str):
+        """删除声明：统一确认文案，确认后按行的身份分派（R8.3）。"""
+        if self._applying:
+            return
+        if panel == "library":
+            t = self.engine.library.by_id(ident)
+            if not t:
+                return
+            if confirm(self, delete_decl_text(t.name, t.entry_dir),
+                       "删除声明", yes="删除声明", no="取消"):
+                self._after_result(self.engine.delete_toolchain(t.id))
+            return
+        row = self._row_by_uid(ident)
+        if row is None:
+            return
+        if row.kind != MANAGED:                  # 失效锚点：只进待应用，不碰配置文件
+            if confirm(self, delete_decl_text(derive_display_name(row.value_raw),
+                                              row.value_raw),
+                       "删除声明", yes="删除声明", no="取消"):
+                self._after_result(self.engine.remove_missing_rows([row.uid]))
+            return
+        t = self.engine.library.by_id(row.toolchain_id) if row.toolchain_id else None
+        name = t.name if t else derive_display_name(row.value_raw)
+        if confirm(self, delete_decl_text(name, t.entry_dir if t else row.value_raw,
+                                          in_path_managed=True),
+                   "移出并删除声明", yes="移出并删除声明", no="取消"):
+            self._after_result(self.engine.delete_toolchain(row.toolchain_id))
+
     # ================================================================ 右键菜单
     def on_list_context_menu(self, kind: str, listw: DragList, pos):
         if self._applying:
@@ -2000,7 +2166,7 @@ class MainWindow(QWidget):
             if not t:
                 return
             menu.addAction(f"编辑：{t.name}", lambda: self._on_edit(t.id))
-            menu.addAction("删除报备", lambda: self._on_delete_library(t.id))
+            menu.addAction("删除声明", lambda: self._on_delete_library(t.id))
             menu.addSeparator()
             menu.addAction("移入 → 用户级底部", lambda: self._run_op(
                 self.engine.move_in_selected([t.id])))
@@ -2011,7 +2177,7 @@ class MainWindow(QWidget):
             else:
                 menu.addAction("移出本行（回库尾）", lambda: self._run_op(
                     self.engine.move_out_rows([ident])))
-                menu.addAction("删除报备并移出 PATH…", lambda: self._on_delete_library_path(ident))
+                menu.addAction("移出并删除声明…", lambda: self._on_delete_library_path(ident))
                 menu.addSeparator()
                 menu.addAction("上移一格", lambda: self._run_op(self.engine.step_move(ident, True)))
                 menu.addAction("下移一格", lambda: self._run_op(self.engine.step_move(ident, False)))
@@ -2205,8 +2371,17 @@ class MainWindow(QWidget):
             return
         self._after_result(self.engine.undo_last())
 
-    def _on_reread(self):
-        self._after_result(self.engine.reread())
+    def _on_refresh(self):
+        """刷新 = 重读配置 + 重读注册表 + 重新扫描存在性；有待应用变更时先确认放弃。"""
+        if self._applying:
+            return
+        if self.engine.pending_count() and not confirm(
+                self,
+                f"还有 {self.engine.pending_entries()} 项未应用的变更，"
+                "刷新将放弃这些变更并重新扫描，继续？",
+                "刷新", yes="刷新", no="取消"):
+            return
+        self._after_result(self.engine.refresh())
 
     def _on_reload_config(self, quiet: bool = True):
         res = self.engine.reload_config()
@@ -2241,8 +2416,8 @@ class MainWindow(QWidget):
         t = self.engine.library.by_id(tid)
         if not t:
             return
-        if not confirm(self, f"从报备库删除“{t.name}”？\n路径：{t.entry_dir}",
-                       "删除报备", yes="删除", no="取消"):
+        if not confirm(self, delete_decl_text(t.name, t.entry_dir),
+                       "删除声明", yes="删除声明", no="取消"):
             return
         self._after_result(self.engine.delete_toolchain(tid))
 
@@ -2253,11 +2428,8 @@ class MainWindow(QWidget):
         t = self.engine.library.by_id(row.toolchain_id)
         if not t:
             return
-        if not confirm(self,
-                       f"该报备“{t.name}”目前在 PATH 中。\n"
-                       "删除报备将同时从 PATH 移出该目录（生成待应用变更）。\n"
-                       "若在应用前退出，该路径仍在 PATH 中，但已失去报备身份（变回锁定锚点）。",
-                       "删除报备并移出 PATH", yes="移出并删除", no="取消"):
+        if not confirm(self, delete_decl_text(t.name, t.entry_dir, in_path_managed=True),
+                       "移出并删除声明", yes="移出并删除声明", no="取消"):
             return
         self._after_result(self.engine.delete_toolchain(t.id))
 
@@ -2314,7 +2486,7 @@ class MainWindow(QWidget):
         problems = self.engine.anchor_invariant_check()
         if problems:
             error(self, "R2 锚点断言失败：PATH 可能已被外部程序改动。\n"
-                  "请先点「重读注册表」再操作。\n\n" + "\n".join(problems))
+                  "请先点「刷新」再操作。\n\n" + "\n".join(problems))
             return
         self._applying = True
         self._set_mutation_enabled(False)
