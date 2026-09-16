@@ -329,6 +329,19 @@ def derive_display_name(entry_dir: str) -> str:
     return base or entry_dir
 
 
+class ConfigUnreadableError(Exception):
+    """配置文件存在但读不出来（权限不足 / 被其他程序占用 / 网络盘断开等）。
+
+    程序不设任何「保护态」：调用方必须弹窗告知用户并退出。任何情况下都不得
+    用空清单覆写用户的报备库（配置文件是报备库的唯一事实源）。
+    """
+
+    def __init__(self, path: str, reason: str):
+        self.path = path
+        self.reason = reason
+        super().__init__(f"无法读取配置文件（{os.path.basename(path)}）：{reason}")
+
+
 class RegisteredFileStore:
     """registered-paths.yaml 的读写器 + 外部改动检测。
 
@@ -353,15 +366,16 @@ class RegisteredFileStore:
 
     # ---------------------------------------------------------- 载入
     def load(self) -> list[str]:
-        """读取配置文件。返回问题清单（重复行、非法行等），正常为 []。
+        """读取配置文件。返回问题清单（重复行等），正常为 []。
 
         若文件不存在：首次启动自动创建空清单（含头部注释）。
+        文件存在但读不出来：抛 ConfigUnreadableError，且不改动内存态 —— 由调用方
+        弹窗告知用户并退出，避免用空清单覆写用户已报备的路径。
         """
         with LOCK:
             issues: list[str] = []
-            self._tools = {}
-            self._header = []                 # 先收集文件自带头部注释；无则写默认
             if not os.path.exists(self.path):
+                self._tools = {}
                 self._header = list(DEFAULT_HEADER)
                 self.save()                   # 自动创建空清单
                 self._sig = self._snapshot()
@@ -371,8 +385,9 @@ class RegisteredFileStore:
                 with open(self.path, "r", encoding="utf-8-sig") as f:
                     lines = f.readlines()
             except OSError as e:
-                self._loaded = False
-                return [f"无法读取配置文件：{e}"]
+                raise ConfigUnreadableError(self.path, str(e)) from e
+            self._tools = {}                  # 读到内容后才改写内存态
+            self._header = []                 # 先收集文件自带头部注释；无则写默认
             seen: set[str] = set()
             order = 0
             header_done = False
@@ -500,9 +515,6 @@ class RegisteredFileStore:
         if t.id not in self._tools:
             self._tools[t.id] = t
 
-    def loaded_ok(self) -> bool:
-        return self._loaded
-
 
 # ============================================================================
 # 核心规则引擎（纯 Python，不依赖 GUI）
@@ -525,21 +537,18 @@ class Engine:
         self.state = PathState()
         self.pending: list[PendingGroup] = []
         self.warnings: list[str] = []
-        self.config_issues: list[str] = []
-        self.config_ok = True
 
     # ================================================================ 启动 / 重建
     def start(self) -> OpResult:
+        """启动：读取配置文件 + 读注册表建右栏。
+
+        配置文件读不出来时抛 ConfigUnreadableError（调用方弹窗并退出）。
+        """
         self.warnings = []
         self.pending = []
-        self.config_issues = self.library.load()
-        self.config_ok = self.library.loaded_ok()
-        if self.config_issues:
-            self.warnings.extend(f"配置文件：{msg}" for msg in self.config_issues)
-        if not self.config_ok:
-            self.warnings.append(
-                f"配置文件（{self.library.config_name}）未能加载：已进入保护态，"
-                "禁止写 PATH 相关操作，请修复后点「刷新」。")
+        issues = self.library.load()
+        if issues:
+            self.warnings.extend(f"配置文件：{msg}" for msg in issues)
         try:
             self._read_path()
         except Exception as e:  # noqa: BLE001
@@ -661,8 +670,6 @@ class Engine:
     # ================================================================ 报备（R6 唯一；报备即接管 R1）
     def register_toolchain(self, dirs) -> OpResult:
         """报备一个 / 一批目录（写入配置文件末尾）。显示名由路径末级派生。"""
-        if not self.config_ok:
-            return OpResult.fail("配置文件未加载，禁止写入（请先点「刷新」）")
         if isinstance(dirs, str):
             dirs = [dirs]
         added: list[Toolchain] = []
@@ -705,8 +712,6 @@ class Engine:
 
     def update_toolchain(self, tid: str, new_dir: str) -> OpResult:
         """重设入口目录（仅“不在 PATH 中”允许，避免与 PATH 语义冲突；在 PATH 中请先移出）。"""
-        if not self.config_ok:
-            return OpResult.fail("配置文件未加载，禁止写入")
         if self.toolchain_in_path(tid):
             return OpResult.fail("该报备当前在 PATH 中，请先「移出」后再修改入口目录")
         t = self.library.by_id(tid)
@@ -1045,19 +1050,14 @@ class Engine:
         """刷新：重读配置文件 + 以注册表重建右栏，目录存在性随之重算。
 
         合并原「重新载入配置」与「重读注册表」两个动作：全部待应用变更被放弃；
-        配置文件载入失败时仍会重读注册表，并进入保护态。
+        配置文件读不出来时抛 ConfigUnreadableError（调用方弹窗并退出）。
         """
         issues = self.library.load()
-        self.config_ok = self.library.loaded_ok()
-        self.config_issues = issues
         self.pending = []
         try:
             self._read_path()
         except Exception as e:  # noqa: BLE001
             return OpResult.fail(f"刷新失败：读取注册表出错：{e}")
-        if not self.config_ok:
-            return OpResult.fail(
-                "已重读注册表；配置文件载入失败，已进入保护态（禁止写 PATH 相关操作）")
         msg = "已刷新：重新载入配置文件、重读注册表，目录存在性已重新扫描"
         if issues:
             msg += "\n" + "\n".join(issues)
@@ -1065,13 +1065,11 @@ class Engine:
 
     # ================================================================ 重新载入配置文件（R0）
     def reload_config(self) -> OpResult:
-        """重读 registered-paths.yaml 刷新报备库；保留待应用变更，并按文件重新分类右栏行身份。"""
+        """重读 registered-paths.yaml 刷新报备库；保留待应用变更，并按文件重新分类右栏行身份。
+
+        配置文件读不出来时抛 ConfigUnreadableError（调用方弹窗并退出）。
+        """
         issues = self.library.load()
-        self.config_ok = self.library.loaded_ok()
-        self.config_issues = issues
-        if not self.config_ok:
-            return OpResult.fail(
-                f"配置文件（{self.library.config_name}）载入失败，已保留旧清单。\n" + "\n".join(issues))
         self._reclassify_rows_from_config()
         pending_n = self.pending_count()
         msg = f"已重新载入配置文件（{self.library.config_name}）"
@@ -1744,6 +1742,19 @@ def confirm(parent, text: str, title: str = "确认", yes="确认", no="取消")
     return box.exec() == QMessageBox.StandardButton.Yes
 
 
+def config_unreadable_text(e: ConfigUnreadableError, extra: str = "") -> str:
+    """配置文件读不出来时的说明文案（启动与运行中共用）。"""
+    return (f"配置文件（{os.path.basename(e.path)}）读取失败：\n{e.reason}\n\n"
+            "为避免用空清单覆盖已报备的内容，程序将退出。\n"
+            "请确认该文件未被其他程序占用、权限正常后再重新启动。" + extra)
+
+
+def fatal_config_unreadable(parent, e: ConfigUnreadableError, extra: str = "") -> None:
+    """配置文件读不出来：弹窗告知用户并退出（全程不改动内存态）。"""
+    QMessageBox.critical(parent, "配置文件读取失败", config_unreadable_text(e, extra))
+    QApplication.exit(1)
+
+
 # ============================================================================
 # GUI：主窗口（三区布局 + 底部应用操作条）
 # ============================================================================
@@ -1994,10 +2005,8 @@ class MainWindow(QWidget):
             self.lib_list.add_row("tool", t.id, w,
                                   search_text=f"{t.name} {t.entry_dir}")
         cfg = self.engine.library.config_name
-        tag = "" if self.engine.config_ok else " · ⚠ 配置未加载（保护态）"
-        self.lib_head.setText(f"报备库({cfg}) · 未加入 {len(items)} 项{tag}")
-        self.config_label.setText(f"配置文件：{self.engine.library.path}"
-                                  if self.engine.config_ok else "配置文件：未加载")
+        self.lib_head.setText(f"报备库({cfg}) · 未加入 {len(items)} 项")
+        self.config_label.setText(f"配置文件：{self.engine.library.path}")
 
     def _rebuild_path(self):
         keep = self._sel_right
@@ -2371,6 +2380,15 @@ class MainWindow(QWidget):
             return
         self._after_result(self.engine.undo_last())
 
+    def _fatal_config_unreadable(self, e: ConfigUnreadableError) -> None:
+        """配置文件读不出来：停掉外部改动轮询，弹窗告知并退出程序。"""
+        self._watch_timer.stop()
+        extra = ""
+        if self.engine.pending_count():
+            extra = (f"\n\n当前还有 {self.engine.pending_entries()} 项未应用的变更，"
+                     "将一并丢失。")
+        fatal_config_unreadable(self, e, extra)
+
     def _on_refresh(self):
         """刷新 = 重读配置 + 重读注册表 + 重新扫描存在性；有待应用变更时先确认放弃。"""
         if self._applying:
@@ -2381,10 +2399,22 @@ class MainWindow(QWidget):
                 "刷新将放弃这些变更并重新扫描，继续？",
                 "刷新", yes="刷新", no="取消"):
             return
-        self._after_result(self.engine.refresh())
+        try:
+            res = self.engine.refresh()
+        except ConfigUnreadableError as e:
+            self._fatal_config_unreadable(e)
+            return
+        # 刷新重建了右栏行（uid 全变），右栏选中本就失效；左栏一并清空，保持两栏选中态一致
+        self._sel_left.clear()
+        self._sel_right.clear()
+        self._after_result(res)
 
     def _on_reload_config(self, quiet: bool = True):
-        res = self.engine.reload_config()
+        try:
+            res = self.engine.reload_config()
+        except ConfigUnreadableError as e:
+            self._fatal_config_unreadable(e)
+            return
         if res.ok:
             self.engine.library.mark_clean()
         self._after_result(res, quiet=quiet)
@@ -2577,7 +2607,11 @@ def main() -> int:
     app.setStyleSheet(APP_QSS)
 
     engine = Engine()
-    res = engine.start()
+    try:
+        res = engine.start()
+    except ConfigUnreadableError as e:
+        fatal_config_unreadable(None, e)
+        return 1
     if not res.ok:
         QMessageBox.critical(None, "初始化失败", res.message)
         return 1

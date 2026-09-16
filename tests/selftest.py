@@ -19,6 +19,7 @@ if ROOT not in sys.path:
 import tool2path as tpm                                                # noqa: E402
 from tool2path import (                                                # noqa: E402
     ANCHOR, DEFAULT_CONFIG_NAME, Engine, MANAGED, RegistryApi,
+    ConfigUnreadableError,
 )
 
 
@@ -92,7 +93,7 @@ def test_config_file_auto_created_on_missing():
         assert res.ok
         assert os.path.exists(e.library.path)
         assert "# Toolchain Path Manager" in open(e.library.path, encoding="utf-8").read()
-        assert e.config_ok and e.left_items() == []
+        assert e.left_items() == []
 
 
 def test_config_is_sole_source_and_display_derived():
@@ -658,19 +659,60 @@ def test_remove_missing_rows_rejects_existing_and_managed():
         assert e.pending_count() == 0 and values(e) == [present, gone]
 
 
-def test_protection_mode_missing_anchor_still_disposable():
+def test_config_unreadable_raises_on_start():
+    """配置文件存在但读不出来：start() 抛 ConfigUnreadableError（由入口弹窗并退出）。"""
     with tempfile.TemporaryDirectory() as tmp:
-        gone1 = os.path.join(tmp, "gone1")
-        gone2 = os.path.join(tmp, "gone2")
         cfg = os.path.join(tmp, DEFAULT_CONFIG_NAME)
-        os.makedirs(cfg)                                 # 配置文件不可读 → 保护态
-        reg = FakeRegistry(user=f"{gone1};{gone2}")
-        e = Engine(registry=reg, config_path=cfg)
+        os.makedirs(cfg)                                 # 同名目录占位 → open() 抛 OSError
+        e = Engine(registry=FakeRegistry(user="X"), config_path=cfg)
+        try:
+            e.start()
+        except ConfigUnreadableError as err:
+            assert err.path == cfg and err.reason
+        else:
+            raise AssertionError("start() 应当抛出 ConfigUnreadableError")
+
+
+def test_unreadable_reload_raises_and_never_wipes_config():
+    """运行中重载 / 刷新读不到文件：抛错，且报备库与磁盘文件都不被改动。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = os.path.join(tmp, DEFAULT_CONFIG_NAME)
+        preset = "- C:\\tools\\a\n- C:\\tools\\b\n"
+        e = make_engine(FakeRegistry(user="C:\\Windows"), tmp, preset=preset)
         e.start()
-        assert not e.config_ok and e.left_items() == []   # 报备库为空，右栏仍可处置
-        assert e.rebuild_dir(gone1).ok and os.path.isdir(gone1)
-        assert e.remove_missing_rows([uid_of(e, gone2)]).ok
+        assert lib_dirs(e) == ["C:\\tools\\a", "C:\\tools\\b"]
+        os.remove(cfg)
+        os.makedirs(cfg)                                 # 文件变成“读不到”
+        for call in (e.reload_config, e.refresh):
+            try:
+                call()
+            except ConfigUnreadableError:
+                pass
+            else:
+                raise AssertionError(f"{call.__name__} 应当抛出 ConfigUnreadableError")
+        assert lib_dirs(e) == ["C:\\tools\\a", "C:\\tools\\b"]   # 库未被清空
+        os.rmdir(cfg)                                    # 占用解除
+        e.library.save()
+        text = open(cfg, encoding="utf-8").read()
+        assert "C:\\tools\\a" in text and "C:\\tools\\b" in text  # 写回仍是完整清单
+
+
+def test_undo_and_discard_never_wipe_config():
+    """带待应用变更时撤销 / 放弃：磁盘文件必须逐字节不变（DEFECT-001 回归）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = os.path.join(tmp, DEFAULT_CONFIG_NAME)
+        reg = FakeRegistry(user="C:\\Windows")
+        e = make_engine(reg, tmp)
+        e.start()
+        add(e, r"C:\tools\a")
+        e.move_in_selected([tool(e, r"C:\tools\a").id])
+        before = open(cfg, encoding="utf-8").read()
         assert e.pending_count() == 1
+        assert e.undo_last().ok
+        assert open(cfg, encoding="utf-8").read() == before
+        e.move_in_selected([tool(e, r"C:\tools\a").id])
+        e.discard_pending()
+        assert open(cfg, encoding="utf-8").read() == before
 
 
 # ============================================================================
@@ -757,10 +799,14 @@ def test_refresh_merges_reload_and_reread():
         assert e.anchor_invariant_check() == []
 
         cfg = os.path.join(tmp, "broken", DEFAULT_CONFIG_NAME)
-        os.makedirs(cfg)                               # 配置文件不可读 → 保护态
+        os.makedirs(cfg)                               # 配置文件读不到 → 直接抛错（入口弹窗并退出）
         e2 = Engine(registry=FakeRegistry(user="X"), config_path=cfg)
-        e2.start()
-        assert not e2.refresh().ok and not e2.config_ok
+        try:
+            e2.start()
+        except ConfigUnreadableError:
+            pass
+        else:
+            raise AssertionError("start() 应当抛出 ConfigUnreadableError")
 
 
 # ============================================================================
@@ -777,7 +823,7 @@ def test_gui_smoke_offscreen():
         reg = FakeRegistry(user=r"C:\Windows\System32")
         e = make_engine(reg, tmp)
         e.start()
-        assert e.config_ok and os.path.exists(e.library.path)
+        assert os.path.exists(e.library.path)
 
         win = MainWindow(e)
         win.show()
