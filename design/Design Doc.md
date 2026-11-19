@@ -394,7 +394,7 @@ R2 的断言逻辑不需要改动：行被移除后不再出现在工作序列�
 补充约束：
 
 - **编辑（重设路径）**：仅允许**不在 PATH 中**的报备项；在 PATH 中的条目会被拒绝并提示先「移出」（避免与 PATH 语义冲突）。
-- **报备表单只填目录**：显示名由目录末级派生（`C:\Program Files\nodejs` → `nodejs`），同名条目以完整路径区分，文件中不含名称字段。
+- **报备表单只填目录**：显示名由目录末级派生（`C:\Program Files\nodejs` → `nodejs`；末级为 `bin` 时带上父级，如 `ucrt64/bin`），同名条目以完整路径区分，文件中不含名称字段。
 - **允许登记当前不存在的目录**：缺失只标黄，不阻断保存。
 
 ### 4.4 什么操作写哪个"盘"
@@ -555,7 +555,8 @@ flowchart TD
 
 ### 6.3 显示名
 
-- 由目录末级派生（`C:\Program Files\nodejs` → `nodejs`），同名条目以完整路径区分。
+- 由目录末级派生（`C:\Program Files\nodejs` → `nodejs`）；末级为 `bin` 时带上父级（`C:\msys64\ucrt64\bin` → `ucrt64/bin`），避免大量同名 `bin` 无法区分。
+- 同名条目以完整路径区分。
 - 显示名**不落盘**，配置文件中没有名称字段。
 
 ---
@@ -572,7 +573,7 @@ flowchart TD
 | 字段 | 含义 |
 | --- | --- |
 | `entryDir` | 目录路径（文件行原文） |
-| `displayName` | 派生显示名（目录末级，同名以完整路径区分） |
+| `displayName` | 派生显示名（目录末级；`bin` 目录带父级，同名以完整路径区分） |
 | `sortOrder` | 由文件行序推导（重排即写回文件） |
 | `createdAt` | 会话内新增时间，仅用于本会话提示，不持久化 |
 
@@ -614,7 +615,7 @@ flowchart TD
 
 ### 8.1 技术栈与取舍
 
-**Python + PySide6，单文件实现 `tool2path.py`**。注册表读写直接用 `winreg` + `ctypes`，与"只写用户级 PATH、无需提权"的形态匹配；核心规则引擎为纯 Python，可脱离 GUI 跑自动化测试，因此 UI 框架替换不影响规则实现，`requirements.txt` 仅 PySide6。
+**Python + PySide6，单文件实现 `tool2path.py`**。注册表读写直接用 `winreg` + `ctypes`，与"只写用户级 PATH、无需提权"的形态匹配；核心规则引擎为纯 Python，可脱离 GUI 跑自动化测试，因此 UI 框架替换不影响规则实现。运行期依赖仅 PySide6；`requirements.txt` 另含打包用的 PyInstaller。
 
 | 备选方案 | 未采用的原因 |
 | --- | --- |
