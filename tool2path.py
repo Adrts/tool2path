@@ -1877,7 +1877,14 @@ class MainWindow(QWidget):
         split.addWidget(self._build_left())
         split.addWidget(self._build_center())
         split.addWidget(self._build_right())
-        split.setSizes([380, 96, 640])
+        split.setSizes([380, 110, 640])
+        # 最低分辨率：保证极端缩放/拉伸下三栏与顶栏、底部操作条均完整可读
+        # 760 = 左栏 240 + 中栏 110 + 右栏 280 + 边距/splitter 手柄约 30
+        # 520 = 顶栏 + 两栏头部/提示 + 列表（仍留约 350px 可视区）+ 底部按钮条
+        self.setMinimumSize(760, 520)
+        split.widget(0).setMinimumWidth(240)
+        split.widget(1).setMinimumWidth(110)
+        split.widget(2).setMinimumWidth(280)
         root.addWidget(split, 1)
 
         # ---- 底部操作条
