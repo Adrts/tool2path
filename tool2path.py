@@ -80,16 +80,21 @@ def type_name(t: int) -> str:
 # 路径规范化与通用工具
 # ============================================================================
 def norm_path(p: str) -> str:
-    """规范化用于判重 / 比较：小写 + 去尾部空格与反斜杠（R6）。"""
-    return p.strip().rstrip("\\").lower()
+    """规范化用于判重 / 比较：分隔符统一、小写 + 去尾部空格与反斜杠（R6）。"""
+    return p.strip().replace("/", "\\").rstrip("\\").lower()
 
 
 def clean_entry_dir(p: str) -> str:
-    """报备时清理用户输入：去引号、去尾部空格与反斜杠。"""
+    """报备时清理用户输入：去引号、统一分隔符为 \\、去尾部空格与反斜杠。
+
+    Qt / QFileDialog 在 Windows 上返回的路径使用 '/' 作分隔符；若不归一，
+    写入 PATH 的首项形如 'D:/tool' 时，Windows 环境变量编辑器会把它当作
+    非盘符绝对路径，从而把整个 PATH 从「文件夹列表」退化为「单行字符串」。
+    """
     p = (p or "").strip()
     if len(p) >= 2 and p[0] == '"' and p[-1] == '"':
         p = p[1:-1].strip()
-    return p.rstrip().rstrip("\\")
+    return p.replace("/", "\\").rstrip().rstrip("\\")
 
 
 def gen_id() -> str:
@@ -570,11 +575,14 @@ class Engine:
             if not n:
                 continue
             managed = n in self._lib_norms()
-            base_items.append(BaseItem(value_raw=token, norm=n, was_managed=managed))
+            # R0：报备行的值取配置的规范形式（已统一为反斜杠），而非沿用
+            # 注册表里可能存在的 '/' 旧串；锚点仍逐字保留（R2）。
+            canonical = self._lib_dir_for(n) if managed else token
+            base_items.append(BaseItem(value_raw=canonical, norm=n, was_managed=managed))
             if managed:
                 tid = self._lib_id_for(n)
                 rows.append(Row(uid=gen_id(), kind=MANAGED,
-                                value_raw=token, norm=n, toolchain_id=tid,
+                                value_raw=canonical, norm=n, toolchain_id=tid,
                                 display_name=self._lib_name_for(n)))
             else:
                 rows.append(Row(uid=gen_id(), kind=ANCHOR,
@@ -588,6 +596,10 @@ class Engine:
     def _lib_id_for(self, n: str) -> str | None:
         t = self.library.by_norm(n)
         return t.id if t else None
+
+    def _lib_dir_for(self, n: str) -> str | None:
+        t = self.library.by_norm(n)
+        return t.entry_dir if t else None
 
     def _lib_norms(self) -> set[str]:
         return self.library.all_norms()
@@ -699,13 +711,17 @@ class Engine:
         return OpResult.ok_result(msg)
 
     def _takeover_rows(self, norm: str, tid: str) -> int:
-        """报备即接管（R1）：把匹配的锚点行转为可操作的报备行。值 / 位置不变，无需写回。"""
+        """报备即接管（R1）：把匹配的锚点行转为可操作的报备行。位置不变。
+
+        值改用配置的规范形式：若旧锚点是 '/' 写法，应用时会一并写成反斜杠。
+        """
         count = 0
         t = self.library.by_id(tid)
         for r in self.rows():
             if r.kind == ANCHOR and r.norm == norm:
                 r.kind = MANAGED
                 r.toolchain_id = tid
+                r.value_raw = t.entry_dir if t else r.value_raw
                 r.display_name = t.name if t else self._lib_name_for(norm)
                 count += 1
         return count

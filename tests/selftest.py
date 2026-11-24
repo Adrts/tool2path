@@ -171,6 +171,59 @@ def test_left_items_only_unjoined():
 
 
 # ============================================================================
+# 路径分隔符规范化（GUI 选目录返回 '/' 导致 PATH 编辑器退化为字符串模式）
+# ============================================================================
+def test_clean_entry_dir_and_norm_path_use_backslash():
+    assert tpm.clean_entry_dir(r"D:/Toolchains/tool2path") == r"D:\Toolchains\tool2path"
+    assert tpm.clean_entry_dir('"D:/a/b/"') == r"D:\a\b"
+    assert tpm.norm_path(r"D:/Toolchains/Foo") == tpm.norm_path(r"d:\toolchains\foo")
+
+
+def test_gui_add_with_forward_slash_writes_backslash_to_config_and_path():
+    """GUI 选目录（Qt 返回 '/'）→ 报备 → 移入 → 应用：配置与 PATH 都应是反斜杠。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = FakeRegistry()
+        e = make_engine(reg, tmp)
+        e.start()
+        assert add(e, "D:/Toolchains/tool2path").ok
+        assert lib_dirs(e) == [r"D:\Toolchains\tool2path"]   # 配置内存值已规范
+        text = open(e.library.path, encoding="utf-8").read()
+        assert "D:/" not in text and r"D:\Toolchains\tool2path" in text
+        e.move_in_selected([tool(e, r"D:\Toolchains\tool2path").id])
+        assert e.apply().ok
+        assert reg.user == r"D:\Toolchains\tool2path", reg.user
+
+
+def test_managed_entry_first_position_slash_is_canonicalized_on_apply():
+    """已部署的旧 PATH：本软件条目用 '/' 且在第一位，重排应用后写回反斜杠。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = FakeRegistry(user="D:/Toolchains/tool2path;C:\\Windows\\System32")
+        e = make_engine(reg, tmp, preset="- D:/Toolchains/tool2path\n")
+        e.start()
+        # 读取时即按配置规范值归一，判重仍能识别为报备项
+        assert [r.kind for r in e.rows()] == [MANAGED, ANCHOR]
+        assert values(e)[0] == r"D:\Toolchains\tool2path"
+        # 报备项已在首位，制造一个真实待应用变更（移出再移入）后应用
+        e.move_out_rows([uid_of(e, r"D:\Toolchains\tool2path")])
+        e.move_in_selected([tool(e, r"D:\Toolchains\tool2path").id])
+        assert e.apply().ok
+        assert "D:/" not in reg.user, reg.user
+        assert r"D:\Toolchains\tool2path" in reg.user
+        assert r"C:\Windows\System32" in reg.user
+
+
+def test_duplicate_across_separator_styles_blocked():
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = FakeRegistry()
+        e = make_engine(reg, tmp)
+        e.start()
+        assert add(e, "D:/Nodejs").ok
+        r = add(e, "d:/nodejs/")
+        assert not r.ok and "已报备" in r.message
+        assert len(e.library.sorted()) == 1
+
+
+# ============================================================================
 # R6 唯一性 / R1 接管
 # ============================================================================
 def test_duplicate_register_blocked_case_insensitive():
